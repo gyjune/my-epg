@@ -1,4 +1,6 @@
-// 简化版本，避免复杂的重定向逻辑
+// 需要创建一个 HTTP 服务器
+const http = require('http');
+
 const Config = {
     repository: 'celetor/epg',
     branch: '112114'
@@ -35,15 +37,14 @@ function getFormatTime(time) {
     return { date, time: timeStr };
 }
 
-// 简单的 fetch 包装，避免重定向问题
+// 简单的 fetch 包装
 async function safeFetch(url) {
     try {
         console.log('Fetching:', url);
         const response = await fetch(url, {
             headers: {
                 'User-Agent': 'Mozilla/5.0 (compatible; EPG-Proxy/1.0)'
-            },
-            redirect: 'follow'
+            }
         });
 
         if (!response.ok) {
@@ -168,66 +169,48 @@ async function handleChannelRequest(channel, date) {
 }
 
 // 主请求处理函数
-async function handleRequest(req) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const channel = url.searchParams.get('ch');
-    
-    // 设置 CORS 头
-    const corsHeaders = {
-        'Access-Control-Allow-Origin': '*',
-        'Access-Control-Allow-Methods': 'GET, OPTIONS',
-        'Access-Control-Allow-Headers': 'Content-Type'
-    };
-
-    // 处理 OPTIONS 请求
-    if (req.method === 'OPTIONS') {
-        return {
-            status: 200,
-            headers: corsHeaders,
-            body: ''
-        };
-    }
-
-    // 只处理 GET 请求
-    if (req.method !== 'GET') {
-        return {
-            status: 405,
-            headers: {
-                'Content-Type': 'application/json',
-                ...corsHeaders
-            },
-            body: JSON.stringify({ error: 'Method not allowed' })
-        };
-    }
-
-    // 如果没有频道参数，返回 XML
-    if (!channel) {
-        return await handleXmlRequest();
-    }
-
-    // 处理频道请求
-    let date = url.searchParams.get('date');
-    if (!date) {
-        date = getNowDate();
-    } else {
-        // 清理日期参数
-        date = getFormatTime(date.replace(/\D+/g, '')).date;
-    }
-
-    return await handleChannelRequest(channel, date);
-}
-
-// Zeabur 入口点
-module.exports = async (req, res) => {
+async function handleRequest(req, res) {
     try {
-        console.log('Request:', {
-            method: req.method,
-            url: req.url,
-            query: req.query
-        });
-
-        const result = await handleRequest(req);
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const channel = url.searchParams.get('ch');
         
+        // 设置 CORS 头
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+        // 处理 OPTIONS 请求
+        if (req.method === 'OPTIONS') {
+            res.statusCode = 200;
+            res.end();
+            return;
+        }
+
+        // 只处理 GET 请求
+        if (req.method !== 'GET') {
+            res.statusCode = 405;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Method not allowed' }));
+            return;
+        }
+
+        let result;
+
+        // 如果没有频道参数，返回 XML
+        if (!channel) {
+            result = await handleXmlRequest();
+        } else {
+            // 处理频道请求
+            let date = url.searchParams.get('date');
+            if (!date) {
+                date = getNowDate();
+            } else {
+                // 清理日期参数
+                date = getFormatTime(date.replace(/\D+/g, '')).date;
+            }
+            result = await handleChannelRequest(channel, date);
+        }
+
         // 设置响应头
         if (result.headers) {
             Object.entries(result.headers).forEach(([key, value]) => {
@@ -250,4 +233,33 @@ module.exports = async (req, res) => {
             message: error.message 
         }));
     }
-};
+}
+
+// 创建 HTTP 服务器
+const server = http.createServer(handleRequest);
+
+// 获取端口（Zeabur 会设置 PORT 环境变量）
+const PORT = process.env.PORT || 3000;
+
+// 启动服务器
+server.listen(PORT, () => {
+    console.log(`EPG Proxy Server running on port ${PORT}`);
+    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+});
+
+// 优雅关闭
+process.on('SIGTERM', () => {
+    console.log('Received SIGTERM, shutting down gracefully');
+    server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+    });
+});
+
+process.on('SIGINT', () => {
+    console.log('Received SIGINT, shutting down gracefully');
+    server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+    });
+});
