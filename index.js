@@ -1,255 +1,253 @@
+// 简化版本，避免复杂的重定向逻辑
 const Config = {
     repository: 'celetor/epg',
     branch: '112114'
 };
 
-function makeRes(body, status = 200, headers = {}) {
-    headers['access-control-allow-origin'] = '*';
-    headers['content-type'] = 'application/json';
-    return {
-        status,
-        headers,
-        body: typeof body === 'string' ? body : JSON.stringify(body)
-    };
-}
-
+// 工具函数
 function getNowDate() {
-    const utc_timestamp = (new Date()).getTime();
-    const china_time = new Date(utc_timestamp + 8 * 60 * 60 * 1000);
-    const month = china_time.getMonth() + 1;
-    const day = china_time.getDate();
-    return `${china_time.getFullYear()}-${month < 10 ? '0' + month : month}-${day < 10 ? '0' + day : day}`;
+    const now = new Date();
+    const china_time = new Date(now.getTime() + 8 * 60 * 60 * 1000);
+    const year = china_time.getUTCFullYear();
+    const month = china_time.getUTCMonth() + 1;
+    const day = china_time.getUTCDate();
+    
+    return `${year}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
 }
 
 function getFormatTime(time) {
-    let result = {
-        date: '',
-        time: ''
-    };
-
-    if (time.length < 8) {
-        result['date'] = getNowDate();
-        return result;
+    if (!time || time.length < 8) {
+        return { date: getNowDate(), time: '00:00' };
     }
 
-    let year = time.substring(0, 4);
-    let month = time.substring(4, 6);
-    let day = time.substring(6, 8);
-    result['date'] = year + '-' + month + '-' + day;
+    const year = time.substring(0, 4);
+    const month = time.substring(4, 6);
+    const day = time.substring(6, 8);
+    const date = `${year}-${month}-${day}`;
 
+    let timeStr = '00:00';
     if (time.length >= 12) {
-        let hour = time.substring(8, 10);
-        let minute = time.substring(10, 12);
-        result['time'] = hour + ':' + minute;
+        const hour = time.substring(8, 10);
+        const minute = time.substring(10, 12);
+        timeStr = `${hour}:${minute}`;
     }
-    return result;
+
+    return { date, time: timeStr };
 }
 
-async function jq_fetch(url, options = {}) {
-    let times = 5;
-    let real_url = url;
-    let isRedirect = false;
-    let response = await fetch(real_url, options);
-
-    while (times > 0) {
-        console.log('status', response.status);
-        if (response.status === 301 || response.status === 302) {
-            isRedirect = true;
-            real_url = response.headers.get('location');
-        } else if (response.redirected === true) {
-            isRedirect = true;
-            real_url = response.url;
-        } else {
-            break;
-        }
-        if (isRedirect) {
-            console.log('real_url', real_url);
-            let newOptions = {
-                headers: {}
-            };
-            
-            // 复制 headers
-            if (options.headers) {
-                for (let [key, value] of Object.entries(options.headers)) {
-                    if (key.toLowerCase() !== 'location') {
-                        if (key.toLowerCase() === 'set-cookie') {
-                            newOptions.headers['cookie'] = value;
-                        } else {
-                            newOptions.headers[key] = value;
-                        }
-                    }
-                }
-            }
-            
-            response = await fetch(real_url, newOptions);
-            times -= 1;
-        }
-    }
-    return response;
-}
-
-async function diypHandle(channel, date, options = {}) {
-    const tag = date.replaceAll('-', '.');
-    const url = `https://github.com/${Config.repository}/releases/download/${tag}/${Config.branch}.json`;
-    
+// 简单的 fetch 包装，避免重定向问题
+async function safeFetch(url) {
     try {
-        const res = await jq_fetch(url, options);
-        
-        if (!res.ok) {
-            throw new Error(`HTTP error! status: ${res.status}`);
-        }
-        
-        const response = await res.json();
+        console.log('Fetching:', url);
+        const response = await fetch(url, {
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (compatible; EPG-Proxy/1.0)'
+            },
+            redirect: 'follow'
+        });
 
-        console.log(channel, date);
-        const program_info = {
-            "date": date,
-            "channel_name": channel,
-            "url": `https://github.com/${Config.repository}`,
-            "epg_data": []
-        };
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        return response;
+    } catch (error) {
+        console.error('Fetch error:', error.message);
+        throw error;
+    }
+}
+
+// 处理 XML 请求
+async function handleXmlRequest() {
+    try {
+        const xmlUrl = `https://github.com/${Config.repository}/releases/latest/download/${Config.branch}.xml`;
+        const response = await safeFetch(xmlUrl);
+        const xmlText = await response.text();
         
-        if (Array.isArray(response)) {
-            response.forEach(function (element) {
-                if (element['@channel'] === channel && element['@start'].startsWith(date.replaceAll('-', ''))) {
-                    program_info['epg_data'].push({
-                        "start": getFormatTime(element['@start'])['time'],
-                        "end": getFormatTime(element['@stop'])['time'],
-                        "title": element['title'] && element['title']['#text'] ? element['title']['#text'] : '未知节目',
-                        "desc": (element['desc'] && element['desc']['#text']) ? element['desc']['#text'] : ''
+        return {
+            status: 200,
+            headers: {
+                'Content-Type': 'text/xml; charset=utf-8',
+                'Access-Control-Allow-Origin': '*'
+            },
+            body: xmlText
+        };
+    } catch (error) {
+        return {
+            status: 500,
+            headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            body: JSON.stringify({ error: 'Failed to fetch XML data' })
+        };
+    }
+}
+
+// 处理频道请求
+async function handleChannelRequest(channel, date) {
+    try {
+        const cleanChannel = channel.replace(/[-]/g, '').toUpperCase();
+        const tag = date.replace(/-/g, '.');
+        const jsonUrl = `https://github.com/${Config.repository}/releases/download/${tag}/${Config.branch}.json`;
+        
+        console.log(`Fetching EPG for channel: ${cleanChannel}, date: ${date}`);
+        
+        const response = await safeFetch(jsonUrl);
+        const data = await response.json();
+
+        const programInfo = {
+            date: date,
+            channel_name: cleanChannel,
+            url: `https://github.com/${Config.repository}`,
+            epg_data: []
+        };
+
+        // 过滤该频道的节目
+        if (Array.isArray(data)) {
+            const dateStr = date.replace(/-/g, '');
+            data.forEach(item => {
+                if (item['@channel'] === cleanChannel && 
+                    item['@start'] && 
+                    item['@start'].startsWith(dateStr)) {
+                    
+                    programInfo.epg_data.push({
+                        start: getFormatTime(item['@start']).time,
+                        end: getFormatTime(item['@stop']).time,
+                        title: item.title?.['#text'] || '未知节目',
+                        desc: item.desc?.['#text'] || ''
                     });
                 }
             });
         }
-        
-        console.log(program_info);
-        if (program_info['epg_data'].length === 0) {
-            program_info['epg_data'].push({
-                "start": "00:00",
-                "end": "23:59",
-                "title": "未知节目",
-                "desc": ""
+
+        // 如果没有找到节目，返回默认节目
+        if (programInfo.epg_data.length === 0) {
+            programInfo.epg_data.push({
+                start: "00:00",
+                end: "23:59",
+                title: "未知节目",
+                desc: ""
             });
         }
-        return program_info;
-    } catch (error) {
-        console.error('Error in diypHandle:', error);
+
         return {
-            "date": date,
-            "channel_name": channel,
-            "url": `https://github.com/${Config.repository}`,
-            "epg_data": [{
-                "start": "00:00",
-                "end": "23:59",
-                "title": "获取节目表失败",
-                "desc": error.message
-            }]
-        };
-    }
-}
-
-async function fetchHandler(req) {
-    const url = new URL(req.url, `http://${req.headers.host}`);
-    const channel = url.searchParams.get("ch");
-
-    if (!channel || channel.length === 0) {
-        try {
-            const xmlUrl = `https://github.com/${Config.repository}/releases/latest/download/${Config.branch}.xml`;
-            const xml_res = await jq_fetch(xmlUrl);
-            
-            if (xml_res.ok) {
-                const xml_text = await xml_res.text();
-                return makeRes(xml_text, 200, {
-                    'content-type': 'text/xml; charset=utf-8',
-                    'access-control-allow-origin': '*'
-                });
-            } else {
-                throw new Error(`Failed to fetch XML: ${xml_res.status}`);
-            }
-        } catch (error) {
-            console.error('Error fetching XML:', error);
-            return makeRes('Failed to fetch EPG data', 500);
-        }
-    }
-
-    let date = url.searchParams.get("date");
-    if (date) {
-        date = getFormatTime(date.replace(/\D+/g, ''))['date'];
-    } else {
-        date = getNowDate();
-    }
-
-    const cleanChannel = channel.replaceAll('-', '').toUpperCase();
-    
-    if (parseInt(date.replaceAll('-', '')) >= 20240214) {
-        const options = {
+            status: 200,
             headers: {
-                'user-agent': 'Mozilla/5.0 (compatible; EPG-Proxy/1.0)'
-            }
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            body: JSON.stringify(programInfo)
         };
+
+    } catch (error) {
+        console.error('Channel request error:', error);
         
-        const programInfo = await diypHandle(cleanChannel, date, options);
-        return makeRes(programInfo);
-    } else {
-        return makeRes({
-            "date": date,
-            "channel_name": cleanChannel,
-            "url": `https://github.com/${Config.repository}`,
-            "epg_data": [{
-                "start": "00:00",
-                "end": "23:59",
-                "title": "历史日期无数据",
-                "desc": ""
+        // 返回默认数据而不是错误
+        const defaultProgram = {
+            date: date,
+            channel_name: channel,
+            url: `https://github.com/${Config.repository}`,
+            epg_data: [{
+                start: "00:00",
+                end: "23:59",
+                title: "暂无节目信息",
+                desc: error.message
             }]
-        });
+        };
+
+        return {
+            status: 200,
+            headers: {
+                'Content-Type': 'application/json',
+                'Access-Control-Allow-Origin': '*'
+            },
+            body: JSON.stringify(defaultProgram)
+        };
     }
 }
 
-// Zeabur 专用导出 - 简化版本
+// 主请求处理函数
+async function handleRequest(req) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const channel = url.searchParams.get('ch');
+    
+    // 设置 CORS 头
+    const corsHeaders = {
+        'Access-Control-Allow-Origin': '*',
+        'Access-Control-Allow-Methods': 'GET, OPTIONS',
+        'Access-Control-Allow-Headers': 'Content-Type'
+    };
+
+    // 处理 OPTIONS 请求
+    if (req.method === 'OPTIONS') {
+        return {
+            status: 200,
+            headers: corsHeaders,
+            body: ''
+        };
+    }
+
+    // 只处理 GET 请求
+    if (req.method !== 'GET') {
+        return {
+            status: 405,
+            headers: {
+                'Content-Type': 'application/json',
+                ...corsHeaders
+            },
+            body: JSON.stringify({ error: 'Method not allowed' })
+        };
+    }
+
+    // 如果没有频道参数，返回 XML
+    if (!channel) {
+        return await handleXmlRequest();
+    }
+
+    // 处理频道请求
+    let date = url.searchParams.get('date');
+    if (!date) {
+        date = getNowDate();
+    } else {
+        // 清理日期参数
+        date = getFormatTime(date.replace(/\D+/g, '')).date;
+    }
+
+    return await handleChannelRequest(channel, date);
+}
+
+// Zeabur 入口点
 module.exports = async (req, res) => {
     try {
-        console.log('Request received:', req.method, req.url);
-        
-        // 设置 CORS 头
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-        
-        // 处理 OPTIONS 请求
-        if (req.method === 'OPTIONS') {
-            res.statusCode = 200;
-            res.end();
-            return;
-        }
-        
-        // 只处理 GET 请求
-        if (req.method !== 'GET') {
-            res.statusCode = 405;
-            res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ error: 'Method not allowed' }));
-            return;
-        }
-        
-        const result = await fetchHandler(req);
+        console.log('Request:', {
+            method: req.method,
+            url: req.url,
+            query: req.query
+        });
+
+        const result = await handleRequest(req);
         
         // 设置响应头
         if (result.headers) {
-            for (const [key, value] of Object.entries(result.headers)) {
+            Object.entries(result.headers).forEach(([key, value]) => {
                 res.setHeader(key, value);
-            }
+            });
         }
         
-        // 设置状态码和响应体
+        // 发送响应
         res.statusCode = result.status || 200;
-        res.end(result.body);
+        res.end(result.body || '');
+
+    } catch (error) {
+        console.error('Unhandled error:', error);
         
-    } catch (err) {
-        console.error('Server error:', err);
         res.statusCode = 500;
         res.setHeader('Content-Type', 'application/json');
+        res.setHeader('Access-Control-Allow-Origin', '*');
         res.end(JSON.stringify({ 
             error: 'Internal server error',
-            message: err.message 
+            message: error.message 
         }));
     }
 };
