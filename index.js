@@ -1,57 +1,16 @@
 const Config = {
     repository: 'celetor/epg',
     branch: '112114'
-}
-
-const init = {
-    status: 200,
-    headers: {
-        'content-type': 'application/json'
-    },
 };
-
-async function jq_fetch(request) {
-    let times = 5;
-    let real_url = '';
-    let isRedirect = false;
-    let response = await fetch(request);
-
-    while (times > 0) {
-        console.log('status', response.status);
-        if (response.status === 301 || response.status === 302) {
-            isRedirect = true;
-            real_url = response.headers.get('location');
-        } else if (response.redirected === true) {
-            isRedirect = true;
-            real_url = response.url;
-        } else {
-            break;
-        }
-        if (isRedirect) {
-            console.log('real_url', real_url);
-            let init = {
-                'headers': {}
-            };
-            for (var p of response.headers) {
-                if (p[0].toLowerCase() !== 'location') {
-                    if (p[0].toLowerCase() === 'set-cookie') {
-                        init.headers['cookie'] = p[1];
-                    } else {
-                        init.headers[p[0]] = p[1];
-                    }
-                }
-            }
-            response = await fetch(new Request(real_url, init));
-            console.log('response', response);
-            times -= 1;
-        }
-    }
-    return response;
-}
 
 function makeRes(body, status = 200, headers = {}) {
     headers['access-control-allow-origin'] = '*';
-    return new Response(body, {status, headers});
+    headers['content-type'] = 'application/json';
+    return {
+        status,
+        headers,
+        body: typeof body === 'string' ? body : JSON.stringify(body)
+    };
 }
 
 function getNowDate() {
@@ -86,99 +45,211 @@ function getFormatTime(time) {
     return result;
 }
 
-async function diypHandle(channel, date, request) {
-    const tag = date.replaceAll('-', '.');
-    const res = await jq_fetch(new Request(`https://github.com/${Config.repository}/releases/download/${tag}/${Config.branch}.json`, request));
-    const response = await res.json();
+async function jq_fetch(url, options = {}) {
+    let times = 5;
+    let real_url = url;
+    let isRedirect = false;
+    let response = await fetch(real_url, options);
 
-    console.log(channel, date);
-    const program_info = {
-        "date": date,
-        "channel_name": channel,
-        "url": `https://github.com/${Config.repository}`,
-        "epg_data": []
-    }
-    response.forEach(function (element) {
-        if (element['@channel'] === channel && element['@start'].startsWith(date.replaceAll('-', ''))) {
-            program_info['epg_data'].push({
-                "start": getFormatTime(element['@start'])['time'],
-                "end": getFormatTime(element['@stop'])['time'],
-                "title": element['title']['#text'],
-                "desc": (element['desc'] && element['desc']['#text']) ? element['desc']['#text'] : ''
-            });
+    while (times > 0) {
+        console.log('status', response.status);
+        if (response.status === 301 || response.status === 302) {
+            isRedirect = true;
+            real_url = response.headers.get('location');
+        } else if (response.redirected === true) {
+            isRedirect = true;
+            real_url = response.url;
+        } else {
+            break;
         }
-    });
-    
-    console.log(program_info);
-    if (program_info['epg_data'].length === 0) {
-        program_info['epg_data'].push({
-            "start": "00:00",
-            "end": "23:59",
-            "title": "未知节目",
-            "desc": ""
-        });
+        if (isRedirect) {
+            console.log('real_url', real_url);
+            let newOptions = {
+                headers: {}
+            };
+            
+            // 复制 headers
+            if (options.headers) {
+                for (let [key, value] of Object.entries(options.headers)) {
+                    if (key.toLowerCase() !== 'location') {
+                        if (key.toLowerCase() === 'set-cookie') {
+                            newOptions.headers['cookie'] = value;
+                        } else {
+                            newOptions.headers[key] = value;
+                        }
+                    }
+                }
+            }
+            
+            response = await fetch(real_url, newOptions);
+            times -= 1;
+        }
     }
-    return new Response(JSON.stringify(program_info), init);
+    return response;
 }
 
-async function fetchHandler(request) {
-    let uri = new URL(request.url);
+async function diypHandle(channel, date, options = {}) {
+    const tag = date.replaceAll('-', '.');
+    const url = `https://github.com/${Config.repository}/releases/download/${tag}/${Config.branch}.json`;
+    
+    try {
+        const res = await jq_fetch(url, options);
+        
+        if (!res.ok) {
+            throw new Error(`HTTP error! status: ${res.status}`);
+        }
+        
+        const response = await res.json();
 
-    let channel = uri.searchParams.get("ch");
-    if (!channel || channel.length === 0) {
-        const xml_res = await jq_fetch(new Request(
-            `https://github.com/${Config.repository}/releases/latest/download/${Config.branch}.xml`, request
-        ));
-        const xml_blob = await xml_res.blob();
-        init['headers']['content-type'] = 'text/xml';
-        return new Response(xml_blob, init);
-    }
-
-    let date = uri.searchParams.get("date");
-    if (date) {
-        date = getFormatTime(date.replace(/\D+/g, ''))['date'];
-    } else {
-        date = getNowDate();
-    }
-
-    channel = channel.replaceAll('-', '').toUpperCase();
-    if (parseInt(date.replaceAll('-', '')) >= 20240214) {
-        return diypHandle(channel, date, request);
-    } else {
-        return new Response(JSON.stringify({
+        console.log(channel, date);
+        const program_info = {
+            "date": date,
+            "channel_name": channel,
+            "url": `https://github.com/${Config.repository}`,
+            "epg_data": []
+        };
+        
+        if (Array.isArray(response)) {
+            response.forEach(function (element) {
+                if (element['@channel'] === channel && element['@start'].startsWith(date.replaceAll('-', ''))) {
+                    program_info['epg_data'].push({
+                        "start": getFormatTime(element['@start'])['time'],
+                        "end": getFormatTime(element['@stop'])['time'],
+                        "title": element['title'] && element['title']['#text'] ? element['title']['#text'] : '未知节目',
+                        "desc": (element['desc'] && element['desc']['#text']) ? element['desc']['#text'] : ''
+                    });
+                }
+            });
+        }
+        
+        console.log(program_info);
+        if (program_info['epg_data'].length === 0) {
+            program_info['epg_data'].push({
+                "start": "00:00",
+                "end": "23:59",
+                "title": "未知节目",
+                "desc": ""
+            });
+        }
+        return program_info;
+    } catch (error) {
+        console.error('Error in diypHandle:', error);
+        return {
             "date": date,
             "channel_name": channel,
             "url": `https://github.com/${Config.repository}`,
             "epg_data": [{
                 "start": "00:00",
                 "end": "23:59",
-                "title": "未知节目",
-                "desc": ""
+                "title": "获取节目表失败",
+                "desc": error.message
             }]
-        }), init);
+        };
     }
 }
 
-// Zeabur 专用导出
+async function fetchHandler(req) {
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const channel = url.searchParams.get("ch");
+
+    if (!channel || channel.length === 0) {
+        try {
+            const xmlUrl = `https://github.com/${Config.repository}/releases/latest/download/${Config.branch}.xml`;
+            const xml_res = await jq_fetch(xmlUrl);
+            
+            if (xml_res.ok) {
+                const xml_text = await xml_res.text();
+                return makeRes(xml_text, 200, {
+                    'content-type': 'text/xml; charset=utf-8',
+                    'access-control-allow-origin': '*'
+                });
+            } else {
+                throw new Error(`Failed to fetch XML: ${xml_res.status}`);
+            }
+        } catch (error) {
+            console.error('Error fetching XML:', error);
+            return makeRes('Failed to fetch EPG data', 500);
+        }
+    }
+
+    let date = url.searchParams.get("date");
+    if (date) {
+        date = getFormatTime(date.replace(/\D+/g, ''))['date'];
+    } else {
+        date = getNowDate();
+    }
+
+    const cleanChannel = channel.replaceAll('-', '').toUpperCase();
+    
+    if (parseInt(date.replaceAll('-', '')) >= 20240214) {
+        const options = {
+            headers: {
+                'user-agent': 'Mozilla/5.0 (compatible; EPG-Proxy/1.0)'
+            }
+        };
+        
+        const programInfo = await diypHandle(cleanChannel, date, options);
+        return makeRes(programInfo);
+    } else {
+        return makeRes({
+            "date": date,
+            "channel_name": cleanChannel,
+            "url": `https://github.com/${Config.repository}`,
+            "epg_data": [{
+                "start": "00:00",
+                "end": "23:59",
+                "title": "历史日期无数据",
+                "desc": ""
+            }]
+        });
+    }
+}
+
+// Zeabur 专用导出 - 简化版本
 module.exports = async (req, res) => {
     try {
-        const response = await fetchHandler(req);
+        console.log('Request received:', req.method, req.url);
+        
+        // 设置 CORS 头
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+        
+        // 处理 OPTIONS 请求
+        if (req.method === 'OPTIONS') {
+            res.statusCode = 200;
+            res.end();
+            return;
+        }
+        
+        // 只处理 GET 请求
+        if (req.method !== 'GET') {
+            res.statusCode = 405;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'Method not allowed' }));
+            return;
+        }
+        
+        const result = await fetchHandler(req);
         
         // 设置响应头
-        if (response.headers) {
-            for (const [key, value] of response.headers.entries()) {
+        if (result.headers) {
+            for (const [key, value] of Object.entries(result.headers)) {
                 res.setHeader(key, value);
             }
         }
         
-        // 设置状态码
-        res.statusCode = response.status;
+        // 设置状态码和响应体
+        res.statusCode = result.status || 200;
+        res.end(result.body);
         
-        // 发送响应体
-        const body = await response.text();
-        res.send(body);
     } catch (err) {
-        res.statusCode = 502;
-        res.send('Zeabur error:\n' + err.stack);
+        console.error('Server error:', err);
+        res.statusCode = 500;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ 
+            error: 'Internal server error',
+            message: err.message 
+        }));
     }
 };
