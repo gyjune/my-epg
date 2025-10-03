@@ -1,13 +1,14 @@
 {
-  "name": "epg-proxy",
+  "name": "epg-proxy-zeabur",
   "version": "1.0.0",
-  "description": "EPG proxy service for Zeabur",
+  "description": "EPG Proxy Service for Zeabur",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "dev": "node index.js"
   },
   "dependencies": {},
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18.0.0"
   }
 }
